@@ -16,10 +16,7 @@
 
 ## 一、GitHub Actions 构建
 
-工作流模板：**[`docs/github-workflow-build.yml`](github-workflow-build.yml)**（手动触发 `workflow_dispatch`）。
-
-> 它暂放在 `docs/` 下，因为推送 `.github/workflows/*` 需要 token 带 `workflow` 权限。
-> 启用：在 GitHub 网页新建 `.github/workflows/build.yml` 粘贴内容，或用带 `repo+workflow` 权限的 token 移动它。
+工作流：`.github/workflows/build.yml`（手动触发 `workflow_dispatch`）。
 
 ### 1. 准备两个固件直链
 
