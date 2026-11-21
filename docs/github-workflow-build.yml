@@ -1,0 +1,176 @@
+# ⚠️ 这个文件是「工作流模板」而不是已启用的工作流：
+#    GitHub 要求 PAT 带 `workflow` 权限才能推送 .github/workflows/*，
+#    所以它放在 docs/ 下作为文档。
+#    启用方式（二选一）：
+#      1) 在 GitHub 网页上新建 .github/workflows/build.yml，把本文件内容粘进去；
+#      2) 用带 repo+workflow 权限的 token 执行：
+#         mkdir -p .github/workflows && cp docs/github-workflow-build.yml .github/workflows/build.yml
+#         git add .github/workflows/build.yml && git commit -m "enable CI" && git push
+name: build-module
+
+# 在 GitHub 的 runner 上构建模块。
+#
+# ⚠️ 重要：本工作流**不包含**任何厂商固件或二进制。你需要自己提供两个固件下载地址
+#    （仓库 Settings → Secrets and variables → Actions 里配置，或用下面的手动输入），
+#    构建产物只作为 workflow artifact 提供给你自己下载，**不要再转发/发布**。
+#
+# 需要配置（二选一：Secrets 或手动输入）：
+#   CN_FW_URL   国行 ColorOS 全量包的 logical 分卷前缀，例如
+#               https://example.com/PJZ110_16.0.7.201-CN01_CN-image-logical.7z.001
+#               （工作流会自动再拉 .002/.003/.004）
+#   OOS_FW_URL  氧OS 全量 OTA zip 的直链（用来取 framework.jar / oplus-framework.jar 和构建指纹）
+#   RUNNER_LABEL（可选，默认 ubuntu-latest；磁盘不够时用自建 runner）
+
+on:
+  workflow_dispatch:
+    inputs:
+      cn_fw_url:
+        description: '国行固件 logical.7z.001 直链（留空则用 Secrets.CN_FW_URL）'
+        required: false
+      oos_fw_url:
+        description: '氧OS OTA zip 直链（留空则用 Secrets.OOS_FW_URL）'
+        required: false
+      ver:
+        description: '模块版本号'
+        required: false
+        default: 'v1.0-op13'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # 自建 runner 时把 RUNNER_LABEL 设成你的标签（需要 >=40 GB 空闲磁盘）
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验输入
+        env:
+          CN_IN: ${{ inputs.cn_fw_url }}
+          OOS_IN: ${{ inputs.oos_fw_url }}
+          CN_SEC: ${{ secrets.CN_FW_URL }}
+          OOS_SEC: ${{ secrets.OOS_FW_URL }}
+        run: |
+          CN="${CN_IN:-$CN_SEC}"; OOS="${OOS_IN:-$OOS_SEC}"
+          if [ -z "$CN" ] || [ -z "$OOS" ]; then
+            echo "::error::缺少固件地址。请在 workflow 输入里填 cn_fw_url / oos_fw_url，或配置同名 Secrets。"
+            echo "本仓库不托管任何厂商固件，必须由你提供。"
+            exit 1
+          fi
+          echo "CN_FW_URL=$CN"  >> "$GITHUB_ENV"
+          echo "OOS_FW_URL=$OOS" >> "$GITHUB_ENV"
+          echo "VER=${{ inputs.ver }}" >> "$GITHUB_ENV"
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            default-jdk-headless clang lld zip unzip p7zip-full erofs-utils curl jq
+          javac -version; clang --version | head -1; fsck.erofs -V 2>&1 | head -1 || true
+
+      - name: 下载构建工具（smali / R8）
+        run: bash scripts/prepare-tools.sh
+
+      - name: 取国行镜像（4 个 .img）
+        run: |
+          set -e
+          mkdir -p work/img work/dl
+          base="${CN_FW_URL%.001}"           # 去掉 .001，拼 .001..004
+          for p in 001 002 003 004; do
+            url="$base.$p"
+            echo "下载 $url"
+            curl -fL --retry 5 --retry-delay 5 -C - -o "work/dl/part.$p" "$url" &
+          done
+          wait
+          ls -lh work/dl
+          7z x -y -owork/img "work/dl/part.001" >/dev/null
+          rm -f work/dl/part.*
+          ls -lh work/img
+          # 4 个分区必须齐
+          for i in system system_ext vendor odm; do
+            [ -f "work/img/$i.img" ] || { echo "::error::缺 $i.img（检查固件地址是不是国行 16.0.7.201）"; exit 1; }
+          done
+
+      - name: 取氧OS 框架（framework.jar / oplus-framework.jar + 指纹）
+        run: |
+          set -e
+          mkdir -p work/oos work/fw
+          curl -fL --retry 5 --retry-delay 5 -o work/oos/ota.zip "$OOS_FW_URL"
+          # payload.bin 在 zip 里，用 payload-dumper-go 解 system 分区
+          curl -fL -o pdg.tgz https://github.com/ssut/payload-dumper-go/releases/download/2.1.0/payload-dumper-go_2.1.0_linux_amd64.tar.gz
+          tar xzf pdg.tgz payload-dumper-go
+          # 从 zip 里取 payload.bin（store 压缩，可直接按偏移拷贝）
+          python3 - <<'PY'
+          import zipfile, struct, sys
+          z = zipfile.ZipFile('work/oos/ota.zip')
+          i = z.getinfo('payload.bin')
+          f = open(z.filename, 'rb'); f.seek(i.header_offset)
+          sig, ver, flag, comp, t, d, crc, csz, usz, nlen, elen = struct.unpack('<4sHHHHHIIIHH', f.read(30))
+          f.read(nlen); f.read(elen)
+          open('work/oos/off.txt', 'w').write('%d %d %d' % (i.compress_type, i.header_offset + 30 + nlen + elen, i.file_size))
+          print('payload.bin: type=%d off=%d size=%d' % (i.compress_type, i.header_offset + 30 + nlen + elen, i.file_size))
+          PY
+          read -r ctype off size < work/oos/off.txt
+          if [ "$ctype" = "0" ]; then
+            dd if=work/oos/ota.zip of=work/oos/payload.bin iflag=skip_bytes,count_bytes skip=$off count=$size bs=16M status=none
+          else
+            python3 -c "import zipfile;zipfile.ZipFile('work/oos/ota.zip').extract('payload.bin','work/oos')"
+          fi
+          ./payload-dumper-go -o work/oos/img work/oos/payload.bin >/dev/null
+          mkdir -p work/oos/fs
+          fsck.erofs --extract=work/oos/fs --no-preserve work/oos/img/system.img >/dev/null
+          cp work/oos/fs/system/framework/framework.jar work/fw/
+          cp work/oos/fs/system/framework/oplus-framework.jar work/fw/
+          # 从 system/build.prop 读构建信息，做成 build.txt（模块开机校验用）
+          BP=work/oos/fs/system/build.prop
+          g() { sed -n "s/^$1=//p" "$BP" | head -1; }
+          {
+            echo "model=$(g ro.product.model)"
+            echo "display=$(g ro.build.display.id)"
+            echo "fingerprint=$(g ro.build.fingerprint)"
+            echo "ota=$(g ro.build.version.ota)"
+            echo "pulled=$(date -u '+%Y-%m-%d %H:%M UTC')"
+          } > work/fw/build.txt
+          cat work/fw/build.txt
+          # 清理大文件，避免磁盘不够
+          rm -rf work/oos
+
+      - name: 构建模块
+        env:
+          CNIMG: ${{ github.workspace }}/work/img
+          USFW: ${{ github.workspace }}/work/fw
+          WORK: ${{ github.workspace }}/work
+          SM3: ${{ github.workspace }}/tools/smali3
+          R8: ${{ github.workspace }}/tools/r8.jar
+        run: |
+          set -e
+          bash scripts/build.sh
+          Z=$(ls work/module/tango32-*.zip | head -1)
+          echo "ZIP=$Z" >> "$GITHUB_ENV"
+          bash tools/manifest.sh gen work/module/tango32 work/module/manifest.txt
+          bash tools/manifest.sh sum work/module/manifest.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo ""
+            echo "### ⚠️ 产物仅供自用"
+            echo "- 模块 zip 内含一加/OPPO/高通专有二进制，**不要上传、转发或公开发布**。"
+            echo "- 与本清单比对只能证明构建一致，不构成任何授权。"
+            echo "- 构建指纹：\`$(sed -n 's/^fingerprint=//p' work/fw/build.txt)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: tango32-module-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 3
+          path: |
+            work/module/tango32-*.zip
+            work/module/manifest.txt
+            work/fw/build.txt
