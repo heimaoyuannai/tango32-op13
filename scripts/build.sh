@@ -5,21 +5,22 @@
 # 输出：/tmp/build13/work/module/tango32-<ver>.zip
 set -euo pipefail
 VER=${VER:-v1.0-op13}
-HERE=/tmp/build13
+# ---- 路径：全部可用环境变量覆盖（CI 就靠这个）----
+HERE=${HERE:-$(cd "$(dirname "$0")/.." && pwd)}   # 仓库根目录
 SRC=$HERE/src
-W=$HERE/work
+W=${WORK:-$HERE/work}
 FS=$W/cnfw/fs
 AP=$W/cnfw/apex
 MODROOT=$W/module
 MOD=$MODROOT/tango32
-CNIMG=/tmp/cnfw/img
-USFW=$W/fw
+CNIMG=${CNIMG:-$W/img}          # 国行 system.img / system_ext.img / vendor.img / odm.img
+USFW=${USFW:-$W/fw}             # framework.jar / oplus-framework.jar / build.txt
 SH=$W/shim
-SM3=/tmp/re/tools/smali3
-R8=/tmp/re/tools/r8.jar
-IMGS="system system_ext vendor odm"
-TESTED="16.0.7.201"
-MODELS="PJZ110 CPH2653"
+SM3=${SM3:-$HERE/tools/smali3}  # scripts/prepare-tools.sh 下载到这里
+R8=${R8:-$HERE/tools/r8.jar}
+IMGS=${IMGS:-"system system_ext vendor odm"}
+TESTED=${TESTED:-16.0.7.201}
+MODELS=${MODELS:-"PJZ110 CPH2653"}
 NS_ALL="com.android.art com.android.i18n com.android.conscrypt com.android.adbd com.android.os.statsd com.android.media com.android.tethering com.android.mediaprovider com.android.neuralnetworks com.android.runtime"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }

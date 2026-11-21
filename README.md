@@ -53,6 +53,37 @@ init  ──(persist.sys.tango_zygote32.start=1 + tango props)──►  service
 | 保留 SUSFS 挂载隐藏 | 在模块目录建 `keep_sus_hide`（32 位支持可能失效） |
 | 卡开机 | 用 KernelSU 安全模式禁用 `tango32` 模块（不涉及 boot 分区改动） |
 
+## 复现、验证与构建产物（重要）
+
+**本仓库不提供模块 zip。** 模块里 95% 的内容是从固件提取的 OnePlus / OPPO / Qualcomm 二进制
+（`/system/lib` 等 900+ 个 `.so`、APEX 32 位库、`tango_translator`），版权不属于本项目，GPL-3.0 也覆盖不到它们——
+公开分发会触发 DMCA 下架甚至封号（上游 Tango32 同样明确要求"don't redistribute built module zips"）。
+`.gitignore` 已排除 `*.zip *.so *.apex *.apk *.img`。
+
+想让别人能验证/复现，用下面两条合规路径：
+
+**① 内容清单（只含哈希，不含二进制）**
+
+```bash
+bash tools/manifest.sh gen work/module/tango32  manifest.txt   # 生成
+bash tools/manifest.sh sum  manifest.txt                       # 按分区统计
+bash tools/manifest.sh cmp  mine.txt reference.txt             # 逐文件 SHA-256 比对
+```
+
+任何人都能用自己的固件构建一次，再跟公开的 `manifest.txt` 对比，确认产物一致——全程不交换任何厂商代码。
+
+**② GitHub Actions 构建（工作流不含固件）**
+
+`.github/workflows/build.yml` 手动触发，固件地址由使用者自己以 Secrets / 输入提供，产物只作为
+workflow artifact（保留 3 天）给本人下载。详见 [`docs/CI.md`](docs/CI.md)（含磁盘/时间要求和自建 runner 的说明）。
+
+| 需要你提供 | 说明 |
+|---|---|
+| `CN_FW_URL` | 国行全量包 `*-image-logical.7z.001` 的直链（自动续拉 002–004） |
+| `OOS_FW_URL` | 氧OS 全量 OTA zip 直链（取 framework.jar + 构建指纹） |
+
+> 构建出来的 zip 只用于**你自己的手机**；请勿上传到 Releases、网盘或任何公开位置。
+
 ## 兼容性说明
 
 - 模块与构建时的 `ro.build.fingerprint` **强绑定**，开机校验不通过会自锁停用（不会半启动）
