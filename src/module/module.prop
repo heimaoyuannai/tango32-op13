@@ -1,0 +1,6 @@
+id=tango32
+name=Tango32 · 32位应用支持 (一加13)
+version=@VER@
+versionCode=@VC@
+author=ionTrix / DSHA port for OnePlus 13 OOS 16.0.7.201
+description=启用 OnePlus 的 Tango 32→64 位翻译器，让 OxygenOS 16.0.7.201 的一加13 能装能跑 32 位应用。基于国行 ColorOS 16.0.7.201 的 32 位用户态构建（KernelSU 版）。

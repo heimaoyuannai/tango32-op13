@@ -1,0 +1,78 @@
+#!/system/bin/sh
+# Tango32 一加13 版 zygote wrapper
+# init 以 zygote 身份启动 /system/bin/app_process32（本脚本），它在自己的 mount namespace 里把
+# 国行 APEX 挂到 /apex 上，再 exec 真正的 32 位二进制 /system/bin/app_process32_tango。
+# 私有命名空间由 /dev/tango32_cn（post-fs-data 里铺好）提供；shim jar 插到 BOOTCLASSPATH 的 framework.jar 前。
+REAL=/system/bin/app_process32_tango
+STAGE=/dev/tango32_cn
+TB=/system/bin/toybox
+SHIM=/system/framework/tango-shim.jar
+BOOTID=$(cut -c1-19 /proc/uptime 2>/dev/null)
+L() { echo "$$ $*" >> /dev/tango32_ns.log 2>/dev/null; }
+NOSTART=/dev/tango32_ns.nostart
+LOGONCE=/dev/tango32_ns.logged
+nostart() {
+  [ -s "$LOGONCE" ] || { L "ERR: $1; 不启动 32 位 zygote"; echo 1 > "$LOGONCE" 2>/dev/null; }
+  exit 1
+}
+
+# 启动次数看门狗：一次开机里反复失败就停手，避免 init 无限重启拖慢系统
+CNT=/dev/tango32_starts
+c=$(cat $CNT 2>/dev/null); c=$(( ${c:-0} + 1 )); echo $c > $CNT 2>/dev/null
+if [ $c -gt 6 ]; then nostart "本次开机已尝试启动 $c 次，放弃"; fi
+
+ok=0
+if [ -n "$($TB ls $STAGE 2>/dev/null)" ]; then
+  # 私有 mount namespace 路线（上游方案）：把国行 APEX 树换到 /apex 上
+  if [ "$TANGO32_NS" != 1 ]; then
+    export TANGO32_NS=1
+    if $TB unshare -m true 2>/dev/null; then
+      exec $TB unshare -m /system/bin/sh "$0" "$@"
+    fi
+    nostart "unshare 不可用"
+  fi
+  $TB mount -o rslave none / 2>/dev/null || $TB mount --make-rslave / 2>/dev/null
+  if $TB grep -E '^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /apex(/| )' /proc/self/mountinfo | $TB grep -q ' shared:'; then
+    nostart "/apex rslave 之后仍是 shared"
+  fi
+  for f in /proc/$$/fd/*; do
+    n=${f##*/}; t=$($TB readlink "$f" 2>/dev/null) || continue
+    case "$t" in /trace_marker|/trace_marker*) eval "exec $n>&-" && L "closed inherited fd $n -> $t";; esac
+  done
+  for d in $STAGE/*; do
+    [ -d "$d" ] || continue
+    n=${d##*/}
+    [ -d "/apex/$n" ] || { L "skip $n (未激活)"; continue; }
+    if $TB mount -o rbind "$d" "/apex/$n" 2>/dev/null; then ok=$((ok+1)); L "ns $n -> CN"; else L "ERR rbind $n"; fi
+  done
+  $TB sleep 2147483647 </dev/null >/dev/null 2>&1 &
+  L "ns holder pid $!"
+else
+  # 同版本固件路线：不动命名空间，直接用模块已经挂进 /apex、/system 的 32 位库
+  L "no $STAGE: 直接启动（不换 APEX）"
+fi
+
+filt() {
+  local o= j IFS=:
+  for j in $2; do
+    if [ -e "$j" ]; then o=${o:+$o:}$j; else L "$1 drop $j"; fi
+  done
+  echo "$o"
+}
+BCP=$(filt BCP "$BOOTCLASSPATH")
+if [ -e "$SHIM" ]; then
+  case ":$BCP:" in
+    *":/system/framework/framework.jar:"*) BCP=$(echo "$BCP" | $TB sed "s#/system/framework/framework.jar#$SHIM:/system/framework/framework.jar#"); L "shim on BCP";;
+    *) L "WARN: framework.jar 不在 BCP 里，shim 没插上";;
+  esac
+else
+  L "WARN: 没有 shim jar"
+fi
+export BOOTCLASSPATH=$BCP
+[ -n "$DEX2OATBOOTCLASSPATH" ] && export DEX2OATBOOTCLASSPATH=$(filt D2OBCP "$DEX2OATBOOTCLASSPATH")
+case ":$BCP:" in *":$SHIM:"*)
+  export DEX2OATBOOTCLASSPATH=$(echo "$DEX2OATBOOTCLASSPATH" | $TB sed "s#/system/framework/framework.jar#$SHIM:/system/framework/framework.jar#")
+  case ":$BCP:" in ":$DEX2OATBOOTCLASSPATH:"*) L "D2OBCP prefix ok";; *) L "WARN: D2OBCP 不是 BCP 前缀";; esac;;
+esac
+L "start: 替换 $ok 个 APEX"
+exec $REAL "$@"

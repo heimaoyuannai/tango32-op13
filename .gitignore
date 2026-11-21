@@ -1,0 +1,12 @@
+# 构建产物（体积大且含固件专有二进制，禁止提交）
+work/
+*.zip
+*.img
+*.apex
+*.apk
+fw/
+cnfw/
+apex/
+*.jar
+*.so
+*.dex
